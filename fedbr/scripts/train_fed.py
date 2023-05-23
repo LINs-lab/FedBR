@@ -30,11 +30,11 @@ from torchvision.datasets import CIFAR100, CIFAR10
 from torchvision import transforms
 from fedbr.generative.datasets import GenerativeDataset, data_transforms_generative
 
-def get_augmentation_mean_data(envs, device, weights):
+def get_augmentation_mean_data(envs, device, weights, bs=32):
 
     augmentation_data = []
     
-    for i in range(32):
+    for i in range(bs):
         chosen_env = torch.randint(0, len(envs), (1,))
         env, env_weights = envs[chosen_env]
         indexs = torch.randint(0, len(env), (10,))
@@ -46,9 +46,9 @@ def get_augmentation_mean_data(envs, device, weights):
 
     return augmentation_data
 
-def get_augmentation_proxy_data(env):
+def get_augmentation_proxy_data(env, bs=32):
     augmentation_data = []
-    for i in range(32):
+    for i in range(bs):
         indexs = torch.randint(0, len(env), (10,))
         current_aug_data = torch.zeros_like(env[0][0])
         current_aug_data = current_aug_data.unsqueeze(0)
@@ -108,6 +108,9 @@ if __name__ == "__main__":
     parser.add_argument('--local_steps', type=int, default=20)
     parser.add_argument('--device', type=int, default=0)
     parser.add_argument('--fedmix_lambda', type=float, default=0.1)
+    parser.add_argument('--use_Mixture', action='store_true')
+    parser.add_argument('--use_Mixup', action='store_true')
+    parser.add_argument('--virtual_set', type=str, default='style_GAN_init_28_c100_200')
     args = parser.parse_args()
 
     # If we ever want to implement checkpointing, just persist these values
@@ -146,6 +149,10 @@ if __name__ == "__main__":
     for k, v in sorted(hparams.items()):
         print('\t{}: {}'.format(k, v))
 
+    hparams['use_Mixture'] = args.use_Mixture
+    hparams['use_Mixup'] = args.use_Mixup
+    # print(hparams['use_Mixture'])
+
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -169,21 +176,39 @@ if __name__ == "__main__":
     if 'FedBR' in args.algorithm:    
         # proxy_mean = [0.5070751592371323, 0.48654887331495095, 0.4409178433670343]
         # proxy_std = [0.2673342858792401, 0.2564384629170883, 0.27615047132568404]
-
-        proxy_mean = [0.48836562, 0.48134598, 0.4451678]
-        proxy_std = [0.24833508, 0.24547848, 0.26617324]
-        transform_proxy = transforms.Compose([
-                transforms.ToTensor(),
-                # transforms.Resize((28, 28)),
-                transforms.Normalize(proxy_mean, proxy_std)
-            ])
-        proxy_dataset = CIFAR10('./fedbr/data/CIFAR10', train=True, download=True, transform=transform_proxy)
+        if 'CIFAR100' in args.dataset:
+            proxy_mean = [0.48836562, 0.48134598, 0.4451678]
+            proxy_std = [0.24833508, 0.24547848, 0.26617324]
+            transform_proxy = transforms.Compose([
+                    transforms.ToTensor(),
+                    # transforms.Resize((28, 28)),
+                    transforms.Normalize(proxy_mean, proxy_std)
+                ])
+            proxy_dataset = CIFAR10('./fedbr/data/CIFAR10', train=True, download=True, transform=transform_proxy)
+        elif 'CIFAR10' in args.dataset:
+            proxy_mean = [0.5070751592371323, 0.48654887331495095, 0.4409178433670343]
+            proxy_std = [0.2673342858792401, 0.2564384629170883, 0.27615047132568404]
+            transform_proxy = transforms.Compose([
+                    transforms.ToTensor(),
+                    # transforms.Resize((28, 28)),
+                    transforms.Normalize(proxy_mean, proxy_std)
+                ])
+            proxy_dataset = CIFAR100('./fedbr/data/CIFAR10', train=True, download=True, transform=transform_proxy)
+        else:
+            raise NotImplementedError
     elif 'VHL' in args.algorithm:
-        GENERETIVE_MEAN, GENERETIVE_STD, proxy_train_transform, proxy_test_transform = data_transforms_generative((32, 32))
-        proxy_dataset = GenerativeDataset(None, 'style_GAN_init_28_c100_200', transform=proxy_train_transform, image_resolution=32)
-        # print(proxy_dataset[0][0].shape)
-        proxy_loader = InfiniteDataLoader(proxy_dataset, None, 32, num_workers=8)
-        proxy_iter = iter(proxy_loader)
+        if 'MNIST' in args.dataset:
+            GENERETIVE_MEAN, GENERETIVE_STD, proxy_train_transform, proxy_test_transform = data_transforms_generative((28, 28))
+            proxy_dataset = GenerativeDataset(None, args.virtual_set, transform=proxy_train_transform, image_resolution=28)
+            # print(proxy_dataset[0][0].shape)
+            proxy_loader = InfiniteDataLoader(proxy_dataset, None, 32, num_workers=8)
+            proxy_iter = iter(proxy_loader)
+        else:
+            GENERETIVE_MEAN, GENERETIVE_STD, proxy_train_transform, proxy_test_transform = data_transforms_generative((32, 32))
+            proxy_dataset = GenerativeDataset(None, args.virtual_set, transform=proxy_train_transform, image_resolution=32)
+            # print(proxy_dataset[0][0].shape)
+            proxy_loader = InfiniteDataLoader(proxy_dataset, None, 32, num_workers=8)
+            proxy_iter = iter(proxy_loader)
 
     # Split each env into an 'in-split' and an 'out-split'. We'll train on
     # each in-split except the test envs, and evaluate on all splits.
@@ -321,11 +346,14 @@ if __name__ == "__main__":
     uda_device = None
     train_losses = []
     if args.algorithm.startswith('FedBR'):
-        # weights = [1.0 / args.train_envs] * args.train_envs            
-        # uda_device = get_augmentation_mean_data([ (env, env_weights)
-        # for i, (env, env_weights) in enumerate(in_splits)
-        # if i not in args.test_envs], device, weights)
-        uda_device = get_augmentation_proxy_data(proxy_dataset)
+        if args.use_Mixture:
+            uda_device = get_augmentation_proxy_data(proxy_dataset, hparams['batch_size'])
+        else:
+            weights = [1.0 / args.train_envs] * args.train_envs            
+            uda_device = get_augmentation_mean_data([ (env, env_weights)
+            for i, (env, env_weights) in enumerate(in_splits)
+            if i not in args.test_envs], device, weights, hparams['batch_size'])
+        # uda_device = get_augmentation_proxy_data(proxy_dataset, hparams['batch_size'])
     elif args.algorithm == 'VHL':
         uda_device = next(proxy_iter)
         
@@ -376,11 +404,12 @@ if __name__ == "__main__":
             if args.algorithm == 'FedCM_algo':
                 Delta = [torch.zeros_like(p).to('cpu') for p in algorithm.algorithm.parameters()]
                 algorithm_copy = copy.deepcopy(algorithm.algorithm)
-            elif args.algorithm == 'FedBR':
-                Delta_disc = [torch.zeros_like(p).to('cpu') for p in algorithm.algorithm.discriminator.parameters()]
-                Delta_gen = [torch.zeros_like(p).to('cpu') for p in (list(algorithm.algorithm.featurizer.parameters()) +
-                list(algorithm.algorithm.classifier.parameters()))]
-                algorithm_copy = copy.deepcopy(algorithm.algorithm)
+            # for FedBR + FedCM
+            # elif args.algorithm == 'FedBR':
+            #     Delta_disc = [torch.zeros_like(p).to('cpu') for p in algorithm.algorithm.discriminator.parameters()]
+            #     Delta_gen = [torch.zeros_like(p).to('cpu') for p in (list(algorithm.algorithm.featurizer.parameters()) +
+            #     list(algorithm.algorithm.classifier.parameters()))]
+            #     algorithm_copy = copy.deepcopy(algorithm.algorithm)
 
 
             algorithm.global_update([local_algorithm.gradients for local_algorithm in local_algorithms], weights, {'global_lr': 1.0})
@@ -388,7 +417,7 @@ if __name__ == "__main__":
             for i, local_algorithm in enumerate(local_algorithms):
                 local_algorithm.copy_from(algorithm)
                 
-                if args.algorithm.startswith('FedBR') or args.algorithm == 'Moon':
+                if args.algorithm.startswith('FedBR') or args.algorithm == 'Moon' or args.algorithm == 'FedNTD':
                     local_algorithm.algorithm.if_updated = True
                 if args.algorithm == 'FedProx_algo':
                     local_algorithm.algorithm.reset_optimizer()
@@ -398,18 +427,19 @@ if __name__ == "__main__":
                 for local_algorithm in local_algorithms:
                     for i, p in enumerate(Delta):
                         local_algorithm.algorithm.Delta[i].data = Delta[i].data
-            elif args.algorithm == 'FedBR':
-                for i, (p, g) in enumerate(zip(algorithm.algorithm.discriminator.parameters(), algorithm_copy.discriminator.parameters())):
-                    Delta_disc[i] = (g.to('cpu') - p.to('cpu')) / (hparams['lr'] * args.local_steps)
-                for i, (p, g) in enumerate(zip((list(algorithm.algorithm.featurizer.parameters()) +
-                        list(algorithm.algorithm.classifier.parameters())), (list(algorithm_copy.featurizer.parameters()) +
-                        list(algorithm_copy.classifier.parameters())))):
-                    Delta_gen[i] = (g.to('cpu') - p.to('cpu')) / (hparams['lr'] * args.local_steps)
-                for local_algorithm in local_algorithms:
-                    for i, p in enumerate(Delta_disc):
-                        local_algorithm.algorithm.Delta_disc[i].data = Delta_disc[i].data
-                    for i, p in enumerate(Delta_gen):
-                        local_algorithm.algorithm.Delta_gen[i].data = Delta_gen[i].data
+            # for FedBR + FedCM
+            # elif args.algorithm == 'FedBR':
+            #     for i, (p, g) in enumerate(zip(algorithm.algorithm.discriminator.parameters(), algorithm_copy.discriminator.parameters())):
+            #         Delta_disc[i] = (g.to('cpu') - p.to('cpu')) / (hparams['lr'] * args.local_steps)
+            #     for i, (p, g) in enumerate(zip((list(algorithm.algorithm.featurizer.parameters()) +
+            #             list(algorithm.algorithm.classifier.parameters())), (list(algorithm_copy.featurizer.parameters()) +
+            #             list(algorithm_copy.classifier.parameters())))):
+            #         Delta_gen[i] = (g.to('cpu') - p.to('cpu')) / (hparams['lr'] * args.local_steps)
+            #     for local_algorithm in local_algorithms:
+            #         for i, p in enumerate(Delta_disc):
+            #             local_algorithm.algorithm.Delta_disc[i].data = Delta_disc[i].data
+            #         for i, p in enumerate(Delta_gen):
+            #             local_algorithm.algorithm.Delta_gen[i].data = Delta_gen[i].data
             
             if args.algorithm == 'Moon':
                 for i, local_algorithm in enumerate(local_algorithms):
@@ -421,11 +451,15 @@ if __name__ == "__main__":
                     local_algorithm.algorithm.set_disc_label(i) 
 
             # if args.algorithm.startswith('FedBR'):
-            #     weights = [0.1] * args.train_envs          
-            #     uda_device = get_augmentation_mean_data([ (env, env_weights)
-            #     for i, (env, env_weights) in enumerate(in_splits)
-            #     if i not in args.test_envs], device, weights)
-                # uda_device = get_augmentation_proxy_data(proxy_dataset)
+            #     if args.use_Mixture:
+            #         uda_device = get_augmentation_proxy_data(proxy_dataset, hparams['batch_size'])
+            #     else:
+            #         weights = [1.0 / args.train_envs] * args.train_envs            
+            #         uda_device = get_augmentation_mean_data([ (env, env_weights)
+            #         for i, (env, env_weights) in enumerate(in_splits)
+            #         if i not in args.test_envs], device, weights, hparams['batch_size'])
+
+        checkpoint_vals['step_time'].append(time.time() - step_start_time)
 
 
         if (step % checkpoint_freq == 0) or (step == n_steps - 1):
@@ -478,7 +512,6 @@ if __name__ == "__main__":
 
 
 
-        checkpoint_vals['step_time'].append(time.time() - step_start_time)
 
     save_checkpoint('model.pkl')
 

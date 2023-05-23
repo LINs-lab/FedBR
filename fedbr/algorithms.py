@@ -419,11 +419,6 @@ class ERM(Algorithm):
 
         self.update_count += 1
         lr = 1.0
-        # print(self.update_count)
-        # if self.update_count >= 15000:
-        #     lr = 0.01
-        # if self.update_count >= 22500:
-        #     lr = 0.001
 
         all_x = Variable(torch.cat([x for x,y in minibatches]))
         all_y = torch.cat([y for x,y in minibatches])
@@ -471,23 +466,23 @@ class VHL(ERM):
     def update(self, minibatches, unlabeled=None):
 
         device = minibatches[0][0].device
-        new_minibatches = self.get_new_all_x(minibatches)
 
         VHL_alpha = 1.0
         self.update_count += 1
-        # new_all_x = torch.cat([x for x,y in new_minibatches]).to(device)
-        # new_all_y = torch.cat([y for x,y in new_minibatches]).to(device)
-        all_x = torch.cat([x for x,y in minibatches])
-        all_y = torch.cat([y for x,y in minibatches])
+
         all_unlabeled_x = unlabeled[0].to(device)
         all_unlabeled_y = unlabeled[1].to(device)
-
-        # new_all_z = self.predict(new_all_x)
-        # classification_loss = - torch.mean(torch.sum(F.log_softmax(new_all_z, 1) * new_all_y, 1))
-
-
+        all_x = torch.cat([x for x,y in minibatches])
+        all_y = torch.cat([y for x,y in minibatches])
         all_z = self.predict(all_x)
-        classification_loss = F.cross_entropy(all_z, all_y)
+        if self.hparams['use_Mixup']:
+            new_minibatches = self.get_new_all_x(minibatches)
+            new_all_x = torch.cat([x for x,y in new_minibatches])
+            new_all_y = torch.cat([y for x,y in new_minibatches])        
+            new_all_z = self.predict(new_all_x)
+            classification_loss = - torch.mean(torch.sum(F.log_softmax(new_all_z, 1) * new_all_y, 1))
+        else:
+            classification_loss = F.cross_entropy(all_z, all_y)
 
         all_unlabeled_z = self.predict(all_unlabeled_x)
         aug_classification_loss = F.cross_entropy(all_unlabeled_z, all_unlabeled_y)
@@ -542,9 +537,14 @@ class SCAFFOLD_algo(ERM):
     def update(self, minibatches, unlabeled=None, reduction=None):
     
         device = minibatches[0][0].device
-        minibatches = self.get_new_all_x(minibatches)
-        all_x = Variable(torch.cat([x for x,y in minibatches]))
-        all_y = torch.cat([y for x,y in minibatches])
+        if self.hparams['use_Mixup']:
+            minibatches = self.get_new_all_x(minibatches)
+            all_x = Variable(torch.cat([x for x,y in minibatches]))
+            all_y = torch.cat([y for x,y in minibatches])
+        else:
+            all_x = Variable(torch.cat([x for x,y in minibatches]))
+            all_y = torch.cat([y for x,y in minibatches])
+            all_y = F.one_hot(all_y, self.num_classes).to(all_x.device)
         # print(all_x.size())
         all_z = self.predict(all_x)
         loss = - torch.mean(torch.sum(F.log_softmax(all_z, 1) * all_y, 1))
@@ -632,9 +632,14 @@ class Moon(ERM):
     def update(self, minibatches, unlabeled=None):
         tau = 0.5
         mu = 0.01
-        minibatches = self.get_new_all_x(minibatches)
-        all_x = torch.cat([x for x,y in minibatches])
-        all_y = torch.cat([y for x,y in minibatches])
+        if self.hparams['use_Mixup']:
+            minibatches = self.get_new_all_x(minibatches)
+            all_x = torch.cat([x for x,y in minibatches])
+            all_y = torch.cat([y for x,y in minibatches])
+        else:
+            all_x = torch.cat([x for x,y in minibatches])
+            all_y = torch.cat([y for x,y in minibatches])
+            all_y = F.one_hot(all_y, self.num_classes).to(all_x.device)
 
         if self.if_updated:
             self.global_feature = copy.deepcopy(self.featurizer)
@@ -671,7 +676,7 @@ class Moon(ERM):
         loss.backward()
         self.optimizer.step()
 
-        return {'loss': l_c.item(), 'penalty': l_con.item()}
+        return {'loss': loss.item(), 'penalty': l_con.item()}
 
 class FedDeCorr(ERM):
 
@@ -698,9 +703,14 @@ class FedDeCorr(ERM):
         return loss_fed_decorr
 
     def update(self, minibatches, unlabeled=None):
-        minibatches = self.get_new_all_x(minibatches)
-        all_x = torch.cat([x for x,y in minibatches])
-        all_y = torch.cat([y for x,y in minibatches])
+        if self.hparams['use_Mixup']:
+            minibatches = self.get_new_all_x(minibatches)
+            all_x = torch.cat([x for x,y in minibatches])
+            all_y = torch.cat([y for x,y in minibatches])
+        else:
+            all_x = torch.cat([x for x,y in minibatches])
+            all_y = torch.cat([y for x,y in minibatches])
+            all_y = F.one_hot(all_y, self.num_classes).to(all_x.device)
 
         all_z = self.featurizer(all_x)
 
@@ -722,6 +732,9 @@ class FedNTD(ERM):
                                   hparams)
         self.global_model = copy.deepcopy(self.network)
         self.if_updated = True
+        self.beta = 1.0
+        self.tau = 1.0
+        self.KLDiv = nn.KLDivLoss(reduction="batchmean")
         
 
     def get_new_all_x(self, minibatches):
@@ -735,12 +748,42 @@ class FedNTD(ERM):
             new_minibatches.append((x, y))
         return new_minibatches
 
+    def refine_as_not_true(self, logits, targets, num_classes):
+        nt_positions = torch.arange(0, num_classes).to(logits.device)
+        nt_positions = nt_positions.repeat(logits.size(0), 1)
+        nt_positions = nt_positions[nt_positions[:, :] != targets.view(-1, 1)]
+        nt_positions = nt_positions.view(-1, num_classes - 1)
+
+        logits = torch.gather(logits, 1, nt_positions)
+
+        return logits
+
+    def _ntd_loss(self, logits, dg_logits, targets):
+        """Not-tue Distillation Loss"""
+
+        # Get smoothed local model prediction
+        logits = self.refine_as_not_true(logits, targets, self.num_classes)
+        pred_probs = F.log_softmax(logits / self.tau, dim=1)
+
+        # Get smoothed global model prediction
+        with torch.no_grad():
+            dg_logits = self.refine_as_not_true(dg_logits, targets, self.num_classes)
+            dg_probs = torch.softmax(dg_logits / self.tau, dim=1)
+
+        loss = (self.tau ** 2) * self.KLDiv(pred_probs, dg_probs)
+
+        return loss
+
     def update(self, minibatches, unlabeled=None):
 
-        # minibatches = self.get_new_all_x(minibatches)
+        # if self.hparams['use_Mixup']:
+        #     minibatches = self.get_new_all_x(minibatches)
+        #     all_x = torch.cat([x for x,y in minibatches])
+        #     all_y = torch.cat([y for x,y in minibatches])
+        # else:
         all_x = torch.cat([x for x,y in minibatches])
         all_y = torch.cat([y for x,y in minibatches])
-        all_y = F.one_hot(all_y, self.num_classes)
+        # all_y = F.one_hot(all_y, self.num_classes).to(all_x.device)
 
         if self.if_updated:
             self.global_model = copy.deepcopy(self.network)
@@ -748,21 +791,16 @@ class FedNTD(ERM):
 
         all_z = self.predict(all_x)
         all_global_z = self.global_model(all_x)
-        loss = - torch.mean(torch.sum(F.log_softmax(all_z, 1) * all_y, 1))
+        loss = F.cross_entropy(all_z, all_y)
         # all_z_1 = copy.deepcopy(all_z)
-        all_z_1 = all_z[(1 - all_y).bool()].reshape(len(all_x), self.num_classes - 1)
-        all_global_z_1 = all_global_z[(1 - all_y).bool()].reshape(len(all_x), self.num_classes - 1)
-        all_z_1 = F.softmax(all_z_1, dim=1)
-        all_global_z_1 = F.softmax(all_global_z_1, dim=1)
-        # l_1 =  F.kl_div(F.softmax(all_z_1, dim=1), F.softmax(all_global_z_1, dim=1))
-        l_1 = torch.mean(all_global_z_1 * torch.log(all_global_z_1 / all_z_1))
-        loss = loss + l_1
+        ntd_loss = self._ntd_loss(all_z, all_global_z, all_y)
+        loss = loss + self.beta * ntd_loss
 
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
 
-        return {'loss': loss.item(), 'penalty': l_1.item()}
+        return {'loss': loss.item(), 'penalty': ntd_loss.item()}
 
 
 
@@ -931,46 +969,46 @@ class FedBR(Algorithm):
         self.discriminator = networks.MLP(self.featurizer.n_outputs_feature,
             self.featurizer.n_outputs_feature, self.hparams)
 
-        self.disc_opt = torch.optim.SGD(self.discriminator.parameters(),
-            lr=self.hparams["lr"],
-            weight_decay=self.hparams['weight_decay'], momentum=0.9)
-
-        # self.disc_opt = FedCM(self.discriminator.parameters(),
-        #     lr=self.hparams["lr"],
-        #     weight_decay=self.hparams['weight_decay'], momentum=0.9)
-
-        # self.disc_opt = FedCM(self.discriminator.parameters(),
-        #     lr=self.hparams["lr"],
-        #     weight_decay=self.hparams['weight_decay'])
-
         # self.disc_opt = torch.optim.SGD(self.discriminator.parameters(),
         #     lr=self.hparams["lr"],
-        #     weight_decay=self.hparams['weight_decay'])
-    
+        #     weight_decay=self.hparams['weight_decay'], momentum=0.9)
 
-        # self.gen_opt = torch.optim.SGD(
-        #     (list(self.featurizer.parameters()) +
-        #         list(self.classifier.parameters())),
-        #     lr=self.hparams["lr"],
-        #     weight_decay=self.hparams['weight_decay'])
-
-        # self.gen_opt = FedCM(
-        #     (list(self.featurizer.parameters()) +
-        #         list(self.classifier.parameters())),
+        # self.disc_opt = FedCM(self.discriminator.parameters(),
         #     lr=self.hparams["lr"],
         #     weight_decay=self.hparams['weight_decay'], momentum=0.9)
 
-        # self.gen_opt = FedCM(
-        #     (list(self.featurizer.parameters()) +
-        #         list(self.classifier.parameters())),
+        # self.disc_opt = FedCM(self.discriminator.parameters(),
         #     lr=self.hparams["lr"],
         #     weight_decay=self.hparams['weight_decay'])
+
+        self.disc_opt = torch.optim.SGD(self.discriminator.parameters(),
+            lr=self.hparams["lr"],
+            weight_decay=self.hparams['weight_decay'])
+    
 
         self.gen_opt = torch.optim.SGD(
             (list(self.featurizer.parameters()) +
                 list(self.classifier.parameters())),
             lr=self.hparams["lr"],
-            weight_decay=self.hparams['weight_decay'], momentum=0.9)
+            weight_decay=self.hparams['weight_decay'])
+
+        # self.gen_opt = FedCM(
+        #     (list(self.featurizer.parameters()) +
+        #         list(self.classifier.parameters())),
+        #     lr=self.hparams["lr"],
+        #     weight_decay=self.hparams['weight_decay'], momentum=0.9)
+
+        # self.gen_opt = FedCM(
+        #     (list(self.featurizer.parameters()) +
+        #         list(self.classifier.parameters())),
+        #     lr=self.hparams["lr"],
+        #     weight_decay=self.hparams['weight_decay'])
+
+        # self.gen_opt = torch.optim.SGD(
+        #     (list(self.featurizer.parameters()) +
+        #         list(self.classifier.parameters())),
+        #     lr=self.hparams["lr"],
+        #     weight_decay=self.hparams['weight_decay'], momentum=0.9)
 
         self.if_updated = True
         self.original_feature = copy.deepcopy(self.featurizer)
@@ -1063,16 +1101,21 @@ class FedBR(Algorithm):
         self.update_count += 1
         lr = 1.0
 
-        minibatches = self.get_new_all_x(minibatches)
-        all_x = torch.cat([x for x, y in minibatches])
-        all_y = torch.cat([y for x, y in minibatches])
-        # all_y = F.one_hot(all_y, self.num_classes).to(all_x.device)
+        if self.hparams['use_Mixup']:
+            minibatches = self.get_new_all_x(minibatches)
+            all_x = torch.cat([x for x, y in minibatches])
+            all_y = torch.cat([y for x, y in minibatches])
+        else:
+            all_x = torch.cat([x for x, y in minibatches])
+            all_y = torch.cat([y for x, y in minibatches])
+            all_y = F.one_hot(all_y, self.num_classes).to(all_x.device)
         all_unlabeled = torch.cat([x for x in unlabeled]).to(device)
 
         q = torch.ones((len(all_y), self.num_classes)).to(all_x.device) / self.num_classes
 
         # using Mixture
-        all_unlabeled, q = self.get_unlabeled_by_self(all_x, all_y, all_unlabeled, 1)
+        if self.hparams['use_Mixture']:
+            all_unlabeled, q = self.get_unlabeled_by_self(all_x, all_y, all_unlabeled, 1)
 
         if self.if_updated:
             self.original_feature = copy.deepcopy(self.featurizer)
@@ -1116,9 +1159,9 @@ class FedBR(Algorithm):
 
         gen_loss =  classifier_loss + (mu * disc_loss) + lam * aug_penalty
 
-        decorr_loss = self.feddecorr_loss(all_self_z)
+        # decorr_loss = self.feddecorr_loss(all_self_z)
 
-        gen_loss = gen_loss + 0.1 * decorr_loss
+        # gen_loss = gen_loss + 0.1 * decorr_loss
 
 
         self.disc_opt.zero_grad()
@@ -1185,11 +1228,16 @@ class AbstractDANN(Algorithm):
 
     def update(self, minibatches, unlabeled=None):
         # print(self.disc_label)
-        minibatches = self.get_new_all_x(minibatches)
         device = minibatches[0][0].device
         self.update_count += 1
-        all_x = torch.cat([x for x, y in minibatches])
-        all_y = torch.cat([y for x, y in minibatches])
+        if self.hparams['use_Mixup']:
+            minibatches = self.get_new_all_x(minibatches)
+            all_x = torch.cat([x for x, y in minibatches])
+            all_y = torch.cat([y for x, y in minibatches])
+        else:
+            all_x = torch.cat([x for x, y in minibatches])
+            all_y = torch.cat([y for x, y in minibatches])
+            all_y = F.one_hot(all_y, self.num_classes).to(all_x.device)
         all_z = self.featurizer(all_x)
         if self.conditional:
             disc_input = all_z + self.class_embeddings(all_y)
