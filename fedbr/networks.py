@@ -141,6 +141,7 @@ class CIFAR_Vgg(nn.Module):
         self.network = torchvision.models.vgg11(pretrained=False).features
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.n_outputs = 512
+        self.n_outputs_feature = 512
 
     def forward(self, x):
 
@@ -190,6 +191,7 @@ class MNIST_CNN(nn.Module):
         self.bn3 = nn.GroupNorm(8, 128)
 
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.n_outputs_feature = 128
 
     def forward(self, x):
         x = self.conv1(x)
