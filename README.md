@@ -50,8 +50,8 @@ python3 -m fedbr.scripts.train_fed \
 
 
 
-## References
-If you use the code, please cite the following paper:
+## Bibliography
+If you find this repository helpful for your project, please consider citing:
 ```
 @inproceedings{guo2023fedbr,
   title={FedBR: Improving Federated Learning on Heterogeneous Data via Local Learning Bias Reduction},
